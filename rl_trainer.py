@@ -1,4 +1,8 @@
 from agents.dqn_agent import DQNAgent
+# from agents.sac_agent import SACAgent
+from agents.sac_agent import SACAgent
+
+from agents.ac_agent import ACAgent
 import scipy
 import numpy as np
 import pandas as pd
@@ -7,8 +11,8 @@ from scipy.stats.stats import pearsonr
 import torch
 from matplotlib.pyplot import figure
 from utils import from_numpy, to_numpy, DataManager, ReplayBuffer, LogManager
-from agents.dqn_agent import DQNAgent
 from sklearn.metrics import normalized_mutual_info_score
+
 
 class RL_Trainer():
 
@@ -32,6 +36,7 @@ class RL_Trainer():
             self.reward_func = self.calculate_mutual_infos
         
         self.data_params = params['data']
+        self.agent_class = self.agent_params['agent_class']
         
         self.DataManager = DataManager(self.data_params, self.num_bands)
         self.LogManager.log_json('data_metadata.json', self.DataManager.data_metadata)
@@ -39,12 +44,14 @@ class RL_Trainer():
         self.replay_buffer = ReplayBuffer()
         self.cache = external_cache
 
-        assert self.agent_params['agent_class'] in ['DQN', 'AC'], 'Invalid Agent Type'
+        assert self.agent_params['agent_class'] in ['DQN', 'AC', 'SAC'], 'Invalid Agent Type'
         
         if self.agent_params['agent_class'] == 'DQN':
             agent_class = DQNAgent
         elif self.agent_params['agent_class'] == 'AC':
-            agent_class = DQNAgent
+            agent_class = ACAgent
+        elif self.agent_params['agent_class'] == 'SAC':
+            agent_class = SACAgent
 
         self.agent = agent_class(self, params)
         self.exp_reward = self.agent_params['exp_reward']
@@ -101,6 +108,11 @@ class RL_Trainer():
         for i in range(self.band_selection_num):
             
             action, action_type = self.agent.policy.get_action(state)
+            # action = action[0]
+            # print(action.item())
+            # action = action.item()
+            # TODO fix this
+            # state_next[1] += 1
             state_next[action] += 1
 
             reward, metric_current_state, metric_next_state = self.calculate_reward(state, state_next)
@@ -111,7 +123,16 @@ class RL_Trainer():
             state = state_next.copy()
         
             if iter_num % 25 == 0:
-                q_values = self.agent.critic.get_action(state)
+
+                if self.agent_class == 'DQN':
+                    q_values = self.agent.critic.get_action(state)
+                elif self.agent_class == 'AC':
+                    q_values = self.agent.critic.get_action(state)
+                elif self.agent_class == 'SAC':
+                    # TODO check if get action is correct
+                    q_values = self.agent.critic.get_action(state, action)
+                    # q_values = from_numpy(np.ndarray([q_values]))
+                    # print("Q values from network", q_values)
                 
                 sampled_paths = self.replay_buffer.sample_buffer_random(1)
                 
@@ -122,7 +143,10 @@ class RL_Trainer():
                 res = np.array([path['re'] for path in flat_sampled_path])
                 terminals = np.array([path['terminal'] for path in flat_sampled_path])
                 
-                loss_value = self.agent.critic.update(obs, acs, obs_next, res, terminals)
+                if self.agent_class == 'SAC':
+                    loss_value = self.agent.update_critic(obs, acs, obs_next, res, terminals)
+                else:
+                    loss_value = self.agent.critic.update(obs, acs, obs_next, res, terminals)
                 
                 row = {
                     "iter_num": iter_num,
@@ -136,6 +160,8 @@ class RL_Trainer():
                     "Reward" : reward,
                     "Loss" : loss_value
                 }
+
+                print(row)
                 
                 self.LogManager.logging_df = self.LogManager.logging_df.append(row, ignore_index=True)
                      
@@ -178,6 +204,7 @@ class RL_Trainer():
 #             print(band[0])
             selected_bands.extend([band[0]]*int(state[band[0]]))
         #print(selected_bands)
+        #print(self.DataManager.rl_data.shape)
         #selected_bands = np.squeeze(np.argwhere(np.array(state)==1))
         corr_sum = 0
         for idx_i, i in enumerate(selected_bands):
